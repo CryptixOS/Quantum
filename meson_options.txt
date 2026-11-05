@@ -1,2 +1,4 @@
 option('extra_incs', type: 'string', value: '')
-option('build_tests', type: 'boolean', value: 'false')
+option('build_tests', type: 'boolean', value: false)
+option('sdl', type: 'feature', value: 'auto',
+       description: 'SDL2 backend, used for testing on the host')

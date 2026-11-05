@@ -1,33 +1,21 @@
 #*
 #* Created by v1tr10l7 on 02.09.2025.
-#* Copyright (c) 2025-2025, Szymon Zemke <v1tr10l7@proton.me>
+#* Copyright (c) 2025-2026, Szymon Zemke <v1tr10l7@proton.me>
 #*
 #* SPDX-License-Identifier: GPL-3
 #*/
 
 tests = [
   'Example',
+  'Shell',
 ]
-cpp_args = [
-  '-Wno-unused-parameter',
-  '-Wno-self-assign-overloaded',
-  '-lgcc_s',
-  '-fmodules-ts',
-]
-link_args = [
-  '-lstdc++exp',
-]
-
-extraincs = get_option('extra_incs')
-if extraincs != ''
-  cpp_args += '-I' + extraincs
-endif
-
+test_incs = include_directories('.')
 foreach name : tests
-  test = executable(
+  test_exe = executable(
     name, [files(name / 'main.cpp')],
-    cpp_args: cpp_args, link_args: link_args,
-    include_directories: incs, dependencies: deps
+    cpp_args: ['-Wno-unused-parameter'],
+    include_directories: test_incs,
+    dependencies: quantum_dep
   )
-  test(name, test)
+  test(name, test_exe, timeout: 60)
 endforeach
