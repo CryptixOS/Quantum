@@ -1,0 +1,57 @@
+name: Unit tests
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git meson ninja pkgconf clang lld fmt sdl2
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and install Prism
+        run: .github/scripts/install-prism.sh
+
+      - name: Configure
+        run: |
+          if [ "${{ matrix.compiler }}" = clang ]; then
+            export CC=clang CXX=clang++
+          fi
+          meson setup build --buildtype=debug -Dbuild_tests=true
+
+      - name: Build
+        run: meson compile -C build
+
+      - name: Run tests
+        run: meson test -C build --print-errorlogs
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testlog-${{ matrix.compiler }}
+          path: build/meson-logs/testlog.txt
+          if-no-files-found: ignore

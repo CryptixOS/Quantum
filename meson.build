@@ -40,9 +40,6 @@ cxx_args = [
 if cxx.get_id() == 'gcc'
   cxx_args += '-Wno-changes-meaning'
 endif
-if cxx.get_id() == 'clang'
-  cxx_args += '-unwindlib=none'
-endif
 
 extraincs = get_option('extra_incs')
 build_tests = get_option('build_tests')
@@ -92,6 +89,10 @@ add_global_arguments(cxx_args, language: 'cpp')
 link_args = []
 if host_machine.system() != 'linux'
   link_args += ['-lsupc++', '-lgcc_s']
+  # Only a linker option, passing it while compiling fails with -Werror
+  if cxx.get_id() == 'clang'
+    link_args += '-unwindlib=none'
+  endif
 endif
 
 quantum_lib = static_library(

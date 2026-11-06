@@ -55,3 +55,18 @@ paste mode (`ESC[?2004h`). Applications can set the clipboard with OSC 52
 (`ESC]52;c;<base64>BEL`), reading the clipboard back through OSC 52 is not
 supported on purpose. The fbdev backend has no system clipboard, so it keeps
 the text in memory, shared between the virtual consoles.
+
+## CI and packaging
+
+- `.github/workflows/typos.yml`: spell checking with [typos](https://github.com/crate-ci/typos).
+- `.github/workflows/build.yml`: gcc and clang, debug and release, plus an
+  fbdev only build, on Arch Linux.
+- `.github/workflows/tests.yml`: `meson test` with gcc and clang.
+- `.github/workflows/aur.yml`: on a `v*` tag, builds `packaging/aur/PKGBUILD.in`
+  with `makepkg` and pushes it to the [`quantum-term`](https://aur.archlinux.org/packages/quantum-term)
+  AUR package. It needs the `AUR_SSH_PRIVATE_KEY`, `AUR_USERNAME` and
+  `AUR_EMAIL` secrets, the tag has to match the version in `meson.build`.
+
+Prism isn't packaged anywhere, so CI and the AUR package build it from the
+revision pinned in `packaging/dependencies.env`
+(`.github/scripts/install-prism.sh` installs it locally the same way).

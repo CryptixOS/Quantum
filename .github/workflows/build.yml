@@ -1,39 +1,68 @@
-name: CI Meson
+name: Build
+
 permissions:
-  contents: write
+  contents: read
 
 on:
   push:
-    branches: ["master"]
+    branches: [main]
   pull_request:
-    branches: [ "master" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-linux:
-    runs-on: [ubuntu-latest]
+  build:
+    name: ${{ matrix.compiler }} / ${{ matrix.buildtype }} / sdl=${{ matrix.sdl }}
+    runs-on: ubuntu-latest
+    # Arch has the compilers needed for C++23, and it is what the AUR
+    # package is built on
+    container: archlinux:latest
     strategy:
       fail-fast: false
       matrix:
-        build-configuration: [debugoptimized, debug, release]
-        architecture: [x86_64, aarch64]
+        compiler: [gcc, clang]
+        buildtype: [debug, release]
+        sdl: [enabled]
+        include:
+          # The configuration used on CryptixOS, fbdev only
+          - compiler: gcc
+            buildtype: debugoptimized
+            sdl: disabled
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
       - name: Install dependencies
-        run: sudo apt update -y && sudo apt install -y meson ninja-build clang lld llvm git cmake python3 pipx fasm
-          && sudo apt install build-essential qemu-system parted udev bison flex libgmp3-dev libmpc-dev libmpfr-dev
-          && sudo apt install texinfo libisl-dev gperf gettext autopoint libreadline-dev help2man groff zsh xorriso g++-aarch64-linux-gnu libgcc-14-dev-arm64-cross libstdc++-14-dev-arm64-cross g++-x86-64-linux-gnu libgcc-14-dev-amd64-cross libstdc++-14-dev-amd64-cross
-          && pipx install xbstrap 
-      - name: Configure Project
-        run: meson setup build --buildtype=${{ matrix.build-configuration }}
-          && ninja -C build -j5
-      - name: Build Tests
-        run: ninja -C build test
-    
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git meson ninja pkgconf clang lld fmt sdl2
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and install Prism
+        run: .github/scripts/install-prism.sh
+
+      - name: Configure
+        run: |
+          if [ "${{ matrix.compiler }}" = clang ]; then
+            export CC=clang CXX=clang++
+          fi
+          meson setup build \
+            --buildtype=${{ matrix.buildtype }} \
+            -Dsdl=${{ matrix.sdl }}
+
+      - name: Build
+        run: meson compile -C build
+
+      - name: Install
+        run: DESTDIR="$PWD/staging" meson install -C build
+
+      - name: Upload binary
+        if: matrix.buildtype == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantum-term-${{ matrix.compiler }}-sdl-${{ matrix.sdl }}
+          path: staging/
+          if-no-files-found: error

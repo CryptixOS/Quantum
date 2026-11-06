@@ -1,0 +1,160 @@
+name: Deploy to AUR
+
+# Publishes the quantum-term package to the AUR whenever a release tag is
+# pushed, e.g. `git tag v0.1.0 && git push origin v0.1.0`
+#
+# Required repository secrets:
+#   AUR_SSH_PRIVATE_KEY  private key of an SSH key pair registered with the
+#                        AUR account that maintains the package
+#   AUR_USERNAME         name used for the AUR commit
+#   AUR_EMAIL            email used for the AUR commit
+
+permissions:
+  contents: read
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish, without the leading 'v' (the tag must exist)
+        required: true
+      dry_run:
+        description: Build and validate the package, but don't push it
+        type: boolean
+        default: true
+
+concurrency:
+  group: aur
+  cancel-in-progress: false
+
+env:
+  AUR_PACKAGE: quantum-term
+
+jobs:
+  deploy:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git meson ninja pkgconf fmt sdl2 \
+            pacman-contrib namcap openssh
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Manual runs publish an existing tag, not the tip of the branch
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/v{0}', inputs.version) || github.ref }}
+
+      - name: Determine the version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            version="${INPUT_VERSION#v}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          # The tag has to match the version in meson.build
+          project_version="$(sed -n "s/^ *version: *'v\?\([^']*\)'.*/\1/p" meson.build | head -n1)"
+          if [ "$version" != "$project_version" ]; then
+            echo "::error::Version $version doesn't match meson.build ($project_version)"
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Generate the PKGBUILD
+        run: |
+          packaging/aur/render.sh "${{ steps.version.outputs.version }}" aur-build
+          # makepkg refuses to run as root
+          useradd --create-home builder
+          chown -R builder:builder aur-build
+
+      - name: Update the checksums
+        working-directory: aur-build
+        run: |
+          su builder -c updpkgsums
+          cat PKGBUILD
+
+      - name: Build and test the package
+        working-directory: aur-build
+        run: |
+          su builder -c 'makepkg --cleanbuild --noconfirm'
+          namcap PKGBUILD *.pkg.tar.zst || true
+
+      - name: Generate .SRCINFO
+        working-directory: aur-build
+        run: su builder -c 'makepkg --printsrcinfo' > .SRCINFO
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: aur-${{ env.AUR_PACKAGE }}-${{ steps.version.outputs.version }}
+          path: |
+            aur-build/PKGBUILD
+            aur-build/.SRCINFO
+            aur-build/*.pkg.tar.zst
+
+      - name: Set up SSH
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "::error::The AUR_SSH_PRIVATE_KEY secret isn't set"
+            exit 1
+          fi
+
+          # Inside of containers $HOME isn't root's home directory, which is
+          # the only place ssh looks at, so pass everything explicitly
+          ssh_dir=/tmp/aur-ssh
+          install -dm700 "$ssh_dir"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$ssh_dir/key"
+          chmod 600 "$ssh_dir/key"
+
+          # Verify the host key against the fingerprint published on
+          # https://aur.archlinux.org (bottom of the home page)
+          ssh-keyscan -t ed25519 aur.archlinux.org > "$ssh_dir/known_hosts" 2>/dev/null
+          fingerprint="$(ssh-keygen -lf "$ssh_dir/known_hosts" | awk '{print $2}')"
+          if [ "$fingerprint" != "SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4" ]; then
+            echo "::error::Unexpected AUR host key fingerprint '$fingerprint'"
+            exit 1
+          fi
+
+          echo "GIT_SSH_COMMAND=ssh -i $ssh_dir/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_dir/known_hosts -o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
+
+      - name: Push to the AUR
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        env:
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+          AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Cloning a package that doesn't exist yet gives an empty
+          # repository, the first push creates it
+          git clone "ssh://aur@aur.archlinux.org/$AUR_PACKAGE.git" aur-repo
+          cp aur-build/PKGBUILD aur-build/.SRCINFO aur-repo/
+
+          cd aur-repo
+          git config user.name "$AUR_USERNAME"
+          git config user.email "$AUR_EMAIL"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "The AUR package is already up to date"
+            exit 0
+          fi
+
+          git commit -m "Update to $VERSION"
+          git push origin HEAD:master
+
+      - name: Remove the SSH key
+        if: always()
+        run: rm -rf /tmp/aur-ssh
