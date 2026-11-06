@@ -8,8 +8,11 @@
 
 #include <Core/Color.hpp>
 #include <Core/Prism.hpp>
+#include <Terminal/Clipboard.hpp>
 
 #include <Prism/String/StringView.hpp>
+
+#include <string>
 
 // Keys that don't produce text on their own, and therefore have to be
 // translated into escape sequences by the terminal
@@ -52,6 +55,13 @@ namespace KeyModifier
     constexpr u32 eControl = 1 << 2;
 }; // namespace KeyModifier
 
+enum class MouseButton
+{
+    eLeft,
+    eMiddle,
+    eRight,
+};
+
 class InputListener
 {
   public:
@@ -65,6 +75,18 @@ class InputListener
     virtual void OnSwitchConsole(usize index)         = 0;
     // The display was closed
     virtual void OnQuit()                             = 0;
+
+    // Copy the selection to the clipboard (Ctrl+Shift+C)
+    virtual void OnCopy() {}
+    // Paste from the given clipboard (Ctrl+Shift+V, Shift+Insert, middle
+    // click)
+    virtual void OnPaste(ClipboardKind) {}
+
+    // Mouse events, coordinates are in framebuffer pixels, @clicks counts
+    // consecutive clicks, i.e. 2 for a double click
+    virtual void OnMouseDown(MouseButton, usize, usize, u32) {}
+    virtual void OnMouseUp(MouseButton, usize, usize) {}
+    virtual void OnMouseMove(usize, usize) {}
 };
 
 // Abstraction over a linear, 32 bits per pixel framebuffer
@@ -89,6 +111,17 @@ class Framebuffer
     virtual i32         EventFd() const { return -1; }
     // Dispatches all pending input events to @listener
     virtual void        PollEvents(InputListener& listener) = 0;
+
+    // Clipboard access, backends without a system clipboard keep the text in
+    // memory, so that copy and paste still work between the virtual consoles
+    virtual void        SetClipboard(ClipboardKind kind, StringView text)
+    {
+        m_Clipboards[ToUnderlying(kind)].assign(text.Raw(), text.Size());
+    }
+    virtual std::string GetClipboard(ClipboardKind kind)
+    {
+        return m_Clipboards[ToUnderlying(kind)];
+    }
 
     inline Pointer      Address() const { return m_Address; }
     inline usize        Width() const { return m_Width; }
@@ -122,5 +155,8 @@ class Framebuffer
     usize   m_Pitch        = 0;
     u16     m_BitsPerPixel = 32;
 
-    bool    m_Dirty        = false;
+    bool        m_Dirty         = false;
+
+  private:
+    std::string m_Clipboards[2] = {};
 };

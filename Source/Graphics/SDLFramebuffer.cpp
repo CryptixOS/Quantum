@@ -7,6 +7,8 @@
 #include <Core/Log.hpp>
 #include <Graphics/SDLFramebuffer.hpp>
 
+#include <Prism/Utility/Math.hpp>
+
 #include <SDL.h>
 
 SDLFramebuffer::SDLFramebuffer(usize width, usize height)
@@ -96,6 +98,73 @@ void SDLFramebuffer::Present()
     m_Dirty = false;
 }
 
+// SDL only gained access to the primary selection in 2.26
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+    #define QUANTUM_SDL_PRIMARY_SELECTION 1
+#else
+    #define QUANTUM_SDL_PRIMARY_SELECTION 0
+#endif
+
+void SDLFramebuffer::SetClipboard(ClipboardKind kind, StringView text)
+{
+    std::string copy(text.Raw(), text.Size());
+
+#if QUANTUM_SDL_PRIMARY_SELECTION
+    i32 status = kind == ClipboardKind::ePrimary
+                   ? SDL_SetPrimarySelectionText(copy.c_str())
+                   : SDL_SetClipboardText(copy.c_str());
+#else
+    // Keep the primary selection in memory instead
+    if (kind == ClipboardKind::ePrimary)
+        return Framebuffer::SetClipboard(kind, text);
+    i32 status = SDL_SetClipboardText(copy.c_str());
+#endif
+
+    // Keep a copy around either way, so that pasting still works when there
+    // is no clipboard manager, or the request failed
+    Framebuffer::SetClipboard(kind, text);
+    if (status != 0)
+        LogWarn("SDL: Failed to set the clipboard -> {}", SDL_GetError());
+}
+std::string SDLFramebuffer::GetClipboard(ClipboardKind kind)
+{
+#if QUANTUM_SDL_PRIMARY_SELECTION
+    char* text = kind == ClipboardKind::ePrimary ? SDL_GetPrimarySelectionText()
+                                                 : SDL_GetClipboardText();
+#else
+    if (kind == ClipboardKind::ePrimary) return Framebuffer::GetClipboard(kind);
+    char* text = SDL_GetClipboardText();
+#endif
+
+    // SDL returns an empty string both on failure, and when the clipboard is
+    // empty
+    std::string contents = text ? text : "";
+    SDL_free(text);
+
+    if (contents.empty()) return Framebuffer::GetClipboard(kind);
+    return contents;
+}
+
+static bool TranslateButton(u8 button, MouseButton& out)
+{
+    switch (button)
+    {
+        case SDL_BUTTON_LEFT: out = MouseButton::eLeft; return true;
+        case SDL_BUTTON_MIDDLE: out = MouseButton::eMiddle; return true;
+        case SDL_BUTTON_RIGHT: out = MouseButton::eRight; return true;
+
+        default: break;
+    }
+
+    return false;
+}
+
+static usize ClampCoordinate(i32 value, usize limit)
+{
+    if (value < 0) return 0;
+    return Math::Min<usize>(value, limit - 1);
+}
+
 static Key TranslateKey(SDL_Keycode keycode)
 {
     switch (keycode)
@@ -171,6 +240,29 @@ void SDLFramebuffer::PollEvents(InputListener& listener)
                     break;
                 }
 
+                // Clipboard shortcuts, the same as in most terminal emulators
+                constexpr u32 ctrlShift
+                    = KeyModifier::eControl | KeyModifier::eShift;
+                if ((modifiers & ctrlShift) == ctrlShift
+                    && !(modifiers & KeyModifier::eAlt))
+                {
+                    if (keycode == SDLK_c)
+                    {
+                        listener.OnCopy();
+                        break;
+                    }
+                    if (keycode == SDLK_v)
+                    {
+                        listener.OnPaste(ClipboardKind::eClipboard);
+                        break;
+                    }
+                }
+                if (keycode == SDLK_INSERT && modifiers == KeyModifier::eShift)
+                {
+                    listener.OnPaste(ClipboardKind::ePrimary);
+                    break;
+                }
+
                 // Control characters are never reported through text input
                 if (modifiers & KeyModifier::eControl)
                 {
@@ -197,6 +289,24 @@ void SDLFramebuffer::PollEvents(InputListener& listener)
                 if (key != Key::eUnknown) listener.OnKey(key, modifiers);
                 break;
             }
+
+            case SDL_MOUSEBUTTONDOWN:
+            case SDL_MOUSEBUTTONUP:
+            {
+                MouseButton button;
+                if (!TranslateButton(event.button.button, button)) break;
+
+                usize x = ClampCoordinate(event.button.x, m_Width);
+                usize y = ClampCoordinate(event.button.y, m_Height);
+                if (event.type == SDL_MOUSEBUTTONDOWN)
+                    listener.OnMouseDown(button, x, y, event.button.clicks);
+                else listener.OnMouseUp(button, x, y);
+                break;
+            }
+            case SDL_MOUSEMOTION:
+                listener.OnMouseMove(ClampCoordinate(event.motion.x, m_Width),
+                                     ClampCoordinate(event.motion.y, m_Height));
+                break;
 
             default: break;
         }

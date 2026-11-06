@@ -38,3 +38,20 @@ Options: `-b sdl|fbdev`, `-d /dev/fb0`, `-g image.png`, `--no-background`,
 Alt+F1..F8 switches between 8 virtual consoles in the SDL backend. Each
 console's shell starts the first time you switch to it.
 `QUANTUM_SCREENSHOT=out.bmp` dumps the last frame on exit.
+
+## Copy and paste
+
+| Action                              | Effect                                          |
+|-------------------------------------|-------------------------------------------------|
+| Left drag                           | Select text, copied to the primary selection    |
+| Double click / triple click         | Select a word / a whole line                    |
+| Ctrl+Shift+C                        | Copy the selection to the clipboard             |
+| Ctrl+Shift+V                        | Paste the clipboard                             |
+| Shift+Insert, middle click          | Paste the primary selection                     |
+
+The selection is cleared as soon as any selected cell changes. Pasted text is
+wrapped in `ESC[200~ ... ESC[201~` when the application enables bracketed
+paste mode (`ESC[?2004h`). Applications can set the clipboard with OSC 52
+(`ESC]52;c;<base64>BEL`), reading the clipboard back through OSC 52 is not
+supported on purpose. The fbdev backend has no system clipboard, so it keeps
+the text in memory, shared between the virtual consoles.

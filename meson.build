@@ -59,6 +59,7 @@ srcs = files(
   'Source/Graphics/Image.cpp',
   'Source/Graphics/ZLib.cpp',
   'Source/Platform/PseudoTerminal.cpp',
+  'Source/Terminal/Clipboard.cpp',
   'Source/Terminal/FramebufferConsole.cpp',
   'Source/Terminal/VirtualConsole.cpp',
 )

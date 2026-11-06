@@ -6,6 +6,7 @@
 #*/
 
 tests = [
+  'Clipboard',
   'Example',
   'Shell',
 ]

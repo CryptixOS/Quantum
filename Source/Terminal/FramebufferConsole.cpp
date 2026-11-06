@@ -222,6 +222,7 @@ void FramebufferConsole::Refresh()
 void FramebufferConsole::Flush()
 {
     EnsureLoaded();
+    if (m_SelectionStale) ClearSelection();
     DrawCursor();
     while (!m_Queue.Empty())
     {
@@ -365,12 +366,14 @@ void FramebufferConsole::PlotChar(Character* c, usize xpos, usize ypos)
     if (!m_Active || !VerifyBounds(xpos, ypos)) return;
     Color defaultBg  = DEFAULT_TEXT_BACKGROUND;
 
-    xpos             = m_OffsetX + xpos * m_Font.GlyphWidth;
-    ypos             = m_OffsetY + ypos * m_Font.GlyphHeight;
-
     bool* glyph      = &m_Glyphs[c->CodePoint * m_Font.Height * m_Font.Width];
     Color foreground = c->Foreground;
     Color background = c->Background;
+    // Selected cells are drawn in reverse video
+    if (m_HasSelection && IsSelected(xpos, ypos)) Swap(foreground, background);
+
+    xpos = m_OffsetX + xpos * m_Font.GlyphWidth;
+    ypos = m_OffsetY + ypos * m_Font.GlyphHeight;
 
     for (usize gy = 0; gy < m_Font.GlyphHeight; gy++)
     {
@@ -399,6 +402,12 @@ void FramebufferConsole::EnqueueChar(Character* c, usize x, usize y)
     usize      i = y * m_Size.ws_col + x;
 
     QueueItem* q = m_Map[i];
+    if (m_HasSelection && IsSelected(x, y))
+    {
+        u32 current = q ? q->Character.CodePoint : m_Grid[i].CodePoint;
+        if (current != c->CodePoint) m_SelectionStale = true;
+    }
+
     if (!q)
     {
         if (m_Grid[i] == *c) return;
@@ -583,4 +592,140 @@ Color FramebufferConsole::BlendMargin(usize x, usize y, Color backgroundPixel)
     u8 newAlpha     = DEFAULT_BACKGROUND.Alpha() + gradientStep * distance;
 
     return backgroundPixel.Blend({DEFAULT_BACKGROUND, newAlpha});
+}
+
+FramebufferConsole::Cell FramebufferConsole::CellAt(usize x, usize y) const
+{
+    Cell cell;
+    if (x > m_OffsetX) cell.X = (x - m_OffsetX) / m_Font.GlyphWidth;
+    if (y > m_OffsetY) cell.Y = (y - m_OffsetY) / m_Font.GlyphHeight;
+
+    if (cell.X >= m_Size.ws_col) cell.X = m_Size.ws_col - 1;
+    if (cell.Y >= m_Size.ws_row) cell.Y = m_Size.ws_row - 1;
+    return cell;
+}
+
+void FramebufferConsole::SetSelection(Cell anchor, Cell head)
+{
+    if (!m_Initialized || !VerifyBounds(anchor.X, anchor.Y)
+        || !VerifyBounds(head.X, head.Y))
+        return;
+
+    auto index = [this](Cell cell) { return cell.Y * m_Size.ws_col + cell.X; };
+    if (index(head) < index(anchor)) Swap(anchor, head);
+
+    bool  hadSelection = m_HasSelection;
+    usize firstRow     = anchor.Y;
+    usize lastRow      = head.Y;
+    if (hadSelection)
+    {
+        if (m_SelectionStart == anchor && m_SelectionEnd == head) return;
+
+        firstRow = Math::Min(firstRow, m_SelectionStart.Y);
+        lastRow  = Math::Max(lastRow, m_SelectionEnd.Y);
+    }
+
+    m_HasSelection   = true;
+    m_SelectionStale = false;
+    m_SelectionStart = anchor;
+    m_SelectionEnd   = head;
+    RedrawRows(firstRow, lastRow);
+}
+void FramebufferConsole::SelectWord(Cell cell)
+{
+    if (!m_Initialized || !VerifyBounds(cell.X, cell.Y)) return;
+
+    // 0: blank, 1: part of a word, 2: anything else, selected on its own
+    auto classify = [this, &cell](usize x) -> u32
+    {
+        u32 c = GetCharacter(x, cell.Y);
+        if (c == ' ' || c == 0) return 0;
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')
+            || (c >= 'A' && c <= 'Z') || c >= 0x80)
+            return 1;
+
+        // Keep paths, URLs and command line options together
+        for (char extra : StringView("-_./~:@%+=?&#$!*"))
+            if (c == static_cast<u8>(extra)) return 1;
+        return 2;
+    };
+
+    u32   kind  = classify(cell.X);
+    usize start = cell.X;
+    usize end   = cell.X;
+    if (kind != 2)
+    {
+        while (start > 0 && classify(start - 1) == kind) --start;
+        while (end + 1 < m_Size.ws_col && classify(end + 1) == kind) ++end;
+    }
+
+    SetSelection({start, cell.Y}, {end, cell.Y});
+}
+void FramebufferConsole::SelectLine(usize row)
+{
+    if (!m_Initialized || row >= m_Size.ws_row) return;
+    SetSelection({0, row}, {m_Size.ws_col - 1u, row});
+}
+void FramebufferConsole::ClearSelection()
+{
+    m_SelectionStale = false;
+    if (!m_HasSelection) return;
+
+    m_HasSelection = false;
+    RedrawRows(m_SelectionStart.Y, m_SelectionEnd.Y);
+}
+
+bool FramebufferConsole::IsSelected(usize x, usize y) const
+{
+    if (!m_HasSelection) return false;
+
+    usize i = y * m_Size.ws_col + x;
+    return i >= m_SelectionStart.Y * m_Size.ws_col + m_SelectionStart.X
+        && i <= m_SelectionEnd.Y * m_Size.ws_col + m_SelectionEnd.X;
+}
+std::string FramebufferConsole::GetSelectedText() const
+{
+    std::string text;
+    if (!m_HasSelection) return text;
+
+    for (usize y = m_SelectionStart.Y; y <= m_SelectionEnd.Y; y++)
+    {
+        usize first = y == m_SelectionStart.Y ? m_SelectionStart.X : 0;
+        usize end
+            = y == m_SelectionEnd.Y ? m_SelectionEnd.X + 1 : m_Size.ws_col;
+
+        // Drop the trailing blanks, they are just unused cells
+        while (end > first)
+        {
+            u32 c = GetCharacter(end - 1, y);
+            if (c != ' ' && c != 0) break;
+            --end;
+        }
+
+        for (usize x = first; x < end; x++)
+            Clipboard::AppendUtf8(
+                text, Clipboard::Cp437ToUnicode(GetCharacter(x, y) & 0xff));
+
+        if (y != m_SelectionEnd.Y) text += '\n';
+    }
+
+    return text;
+}
+
+void FramebufferConsole::RedrawRows(usize first, usize last)
+{
+    if (!m_Active) return;
+    if (last >= m_Size.ws_row) last = m_Size.ws_row - 1;
+
+    for (usize y = first; y <= last; y++)
+    {
+        for (usize x = 0; x < m_Size.ws_col; x++)
+        {
+            usize i = y * m_Size.ws_col + x;
+            PlotChar(m_Map[i] ? &m_Map[i]->Character : &m_Grid[i], x, y);
+        }
+    }
+
+    if (m_CurrentState.CursorY >= first && m_CurrentState.CursorY <= last)
+        DrawCursor();
 }

@@ -26,6 +26,9 @@ class SDLFramebuffer final : public Framebuffer
     void       Present() override;
     void       PollEvents(InputListener& listener) override;
 
+    void        SetClipboard(ClipboardKind kind, StringView text) override;
+    std::string GetClipboard(ClipboardKind kind) override;
+
   private:
     SDL_Window*   m_Window   = nullptr;
     SDL_Renderer* m_Renderer = nullptr;

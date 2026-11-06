@@ -8,10 +8,12 @@
 
 #include <Core/Color.hpp>
 #include <Core/Prism.hpp>
+#include <Terminal/Clipboard.hpp>
 
 #include <Prism/Containers/KeyValuePair.hpp>
 #include <Prism/String/StringView.hpp>
 
+#include <string>
 #include <sys/ioctl.h>
 
 namespace AnsiColor
@@ -42,6 +44,8 @@ class ConsoleClient
   public:
     virtual ~ConsoleClient()                  = default;
     virtual void SendToClient(StringView data) = 0;
+    // The application asked to store @text in a clipboard (OSC 52)
+    virtual void SetClipboard(ClipboardKind, StringView) {}
 };
 
 // Terminal emulator state machine, extracted from the CryptixOS kernel's
@@ -54,6 +58,11 @@ class VirtualConsole
 
     inline const winsize& GetSize() const { return m_Size; }
     inline bool           GetCursorKeyMode() const { return m_CursorKeyMode; }
+    // Whether pasted text has to be wrapped in ESC[200~ ... ESC[201~
+    inline bool           GetBracketedPasteMode() const
+    {
+        return m_BracketedPaste;
+    }
 
     inline void SetClient(ConsoleClient* client) { m_Client = client; }
 
@@ -160,12 +169,19 @@ class VirtualConsole
 
     bool                                m_DecPrivate       = false;
     bool                                m_CursorKeyMode    = false;
+    bool                                m_BracketedPaste   = false;
     bool                                m_CursorVisible    = true;
 
     // Character sets
     usize                               m_CharsetSlot      = 0;
     usize                               m_ActiveCharset    = 0;
     Array<bool, 2>                      m_LineDrawing      = {false, false};
+
+    // Payload of the operating system command being parsed, only kept for
+    // OSC sequences, DCS/APC/PM strings are dropped
+    constexpr static usize              MAX_OSC_LENGTH     = 1024 * 1024;
+    std::string                         m_OscBuffer;
+    bool                                m_OscCollect       = false;
 
     // UTF-8 decoding
     u32                                 m_CodePoint        = 0;
@@ -198,6 +214,7 @@ class VirtualConsole
     void         PrintCodePoint(u32 codePoint);
 
     void         Respond(StringView data);
+    void         OnOsc();
     u32          Param(usize index, u32 defaultValue = 1) const;
     void         LineFeed();
     void         ReverseLineFeed();

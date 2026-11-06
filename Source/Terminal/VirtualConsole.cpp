@@ -32,13 +32,24 @@ void VirtualConsole::PutCharImpl(u64 c)
         case State::eControlSequenceEntry:
         case State::eControlSequenceParams: OnCsi(c); return;
         // Operating system commands (e.g. window title) are terminated either
-        // by BEL, or by ST (ESC \), we don't support any, so just skip them
+        // by BEL, or by ST (ESC \), only OSC 52 (clipboard) is supported
         case State::eOsCommand:
-            if (c == '\a' || c == 0x9c) m_State = State::eNormal;
+            if (c == '\a' || c == 0x9c)
+            {
+                m_State = State::eNormal;
+                OnOsc();
+            }
             else if (c == '\e') m_State = State::eOsCommandEscape;
+            else if (m_OscCollect && m_OscBuffer.size() < MAX_OSC_LENGTH)
+                m_OscBuffer += static_cast<char>(c);
             return;
         case State::eOsCommandEscape:
-            m_State = c == '\\' ? State::eNormal : State::eOsCommand;
+            if (c == '\\')
+            {
+                m_State = State::eNormal;
+                OnOsc();
+            }
+            else m_State = State::eOsCommand;
             return;
         case State::eSelectCharset:
             m_LineDrawing[m_CharsetSlot] = c == '0';
@@ -133,6 +144,46 @@ void VirtualConsole::Respond(StringView data)
 {
     if (m_Client) m_Client->SendToClient(data);
 }
+void VirtualConsole::OnOsc()
+{
+    if (!m_OscCollect) return;
+    m_OscCollect = false;
+
+    std::string payload;
+    payload.swap(m_OscBuffer);
+
+    // OSC 52 ; <selections> ; <base64 data>
+    if (!payload.starts_with("52;")) return;
+    usize separator = payload.find(';', 3);
+    if (separator == std::string::npos) return;
+
+    StringView selections(payload.data() + 3, separator - 3);
+    StringView data(payload.data() + separator + 1,
+                    payload.size() - separator - 1);
+
+    // Reading the clipboard back would let any program running inside of the
+    // terminal snoop on it, so queries are ignored
+    if (data == "?" || !m_Client) return;
+
+    std::string text;
+    if (!Clipboard::Base64Decode(data, text))
+    {
+        LogTrace("VirtualConsole: OSC 52 with malformed base64 data");
+        return;
+    }
+
+    bool clipboard = selections.Empty();
+    bool primary   = false;
+    for (auto c : selections)
+    {
+        if (c == 'c') clipboard = true;
+        else if (c == 'p' || c == 's') primary = true;
+    }
+
+    StringView view(text.data(), text.size());
+    if (clipboard) m_Client->SetClipboard(ClipboardKind::eClipboard, view);
+    if (primary) m_Client->SetClipboard(ClipboardKind::ePrimary, view);
+}
 u32 VirtualConsole::Param(usize index, u32 defaultValue) const
 {
     if (index >= m_EscapeValueCount || m_EscapeValues[index] == 0)
@@ -170,7 +221,11 @@ void VirtualConsole::OnEscapeChar(char c)
         case ']':
         case 'P':
         case '_':
-        case '^': m_State = State::eOsCommand; return;
+        case '^':
+            m_OscBuffer.clear();
+            m_OscCollect = c == ']';
+            m_State      = State::eOsCommand;
+            return;
         // Reset
         case 'c':
             Reset();
@@ -321,6 +376,9 @@ void VirtualConsole::Reset()
     m_State              = State::eNormal;
     m_DecPrivate         = false;
     m_CursorKeyMode      = false;
+    m_BracketedPaste     = false;
+    m_OscCollect         = false;
+    m_OscBuffer.clear();
     m_CharsetSlot        = 0;
     m_ActiveCharset      = 0;
     m_LineDrawing        = {false, false};
@@ -613,6 +671,8 @@ void VirtualConsole::SM(bool set)
                 m_CursorVisible = set;
                 set ? ShowCursor() : (void)HideCursor();
                 break;
+            // Bracketed paste
+            case 2004: m_BracketedPaste = set; break;
 
             default: break;
         }

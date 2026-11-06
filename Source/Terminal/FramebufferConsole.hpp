@@ -53,6 +53,34 @@ class FramebufferConsole final : public VirtualConsole
         return m_Map[i] ? m_Map[i]->Character.CodePoint : m_Grid[i].CodePoint;
     }
 
+    // Text selection, used for copying, it is linear, i.e. it covers
+    // everything from the start cell up to the end cell, like in the Linux
+    // console, it's dropped as soon as any of the selected cells changes
+    struct Cell
+    {
+        usize          X = 0;
+        usize          Y = 0;
+
+        constexpr bool operator==(const Cell& other) const = default;
+    };
+
+    // Cell under the pixel at @x, @y, clamped to the grid
+    Cell         CellAt(usize x, usize y) const;
+
+    // Selects everything between @anchor and @head, inclusive, in either
+    // direction
+    void         SetSelection(Cell anchor, Cell head);
+    // Selects the word, or the run of blanks under @cell
+    void         SelectWord(Cell cell);
+    void         SelectLine(usize row);
+    void         ClearSelection();
+
+    inline bool  HasSelection() const { return m_HasSelection; }
+    bool         IsSelected(usize x, usize y) const;
+    // Contents of the selection encoded as UTF-8, trailing blanks of every
+    // line are removed, and lines are separated with '\n'
+    std::string  GetSelectedText() const;
+
   protected:
     explicit FramebufferConsole(Framebuffer& framebuffer, const Options& options)
         : m_Framebuffer(framebuffer)
@@ -174,6 +202,13 @@ class FramebufferConsole final : public VirtualConsole
     Vector<QueueItem*> m_Map;
     Vector<Character>  m_Grid;
     Vector<bool>       m_Glyphs;
+
+    bool               m_HasSelection   = false;
+    bool               m_SelectionStale = false;
+    Cell               m_SelectionStart = {};
+    Cell               m_SelectionEnd   = {};
+
+    void               RedrawRows(usize first, usize last);
 
     void               PlotChar(Character* c, usize xpos, usize ypos);
     void               EnqueueChar(Character* c, usize x, usize y);

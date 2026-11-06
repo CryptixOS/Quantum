@@ -166,12 +166,21 @@ namespace
 
     struct Session final : public ConsoleClient
     {
+        explicit Session(Framebuffer& framebuffer)
+            : Display(framebuffer)
+        {
+        }
+        ~Session() override { delete Console; }
+
+        Framebuffer&        Display;
         FramebufferConsole* Console = nullptr;
         PseudoTerminal      Pty;
 
-        ~Session() override { delete Console; }
-
         void SendToClient(StringView data) override { Pty.Write(data); }
+        void SetClipboard(ClipboardKind kind, StringView text) override
+        {
+            Display.SetClipboard(kind, text);
+        }
     };
 
     class Application final : public InputListener
@@ -304,6 +313,79 @@ namespace
         void OnSwitchConsole(usize index) override { SwitchTo(index); }
         void OnQuit() override { m_Running = false; }
 
+        void OnCopy() override
+        {
+            auto session = Active();
+            if (!session || !session->Console->HasSelection()) return;
+
+            auto text = session->Console->GetSelectedText();
+            m_Framebuffer.SetClipboard(ClipboardKind::eClipboard,
+                                       StringView(text.data(), text.size()));
+        }
+        void OnPaste(ClipboardKind kind) override
+        {
+            auto session = Active();
+            if (!session) return;
+
+            auto text = m_Framebuffer.GetClipboard(kind);
+            // Fall back to the clipboard, if nothing was selected yet
+            if (text.empty() && kind == ClipboardKind::ePrimary)
+                text = m_Framebuffer.GetClipboard(ClipboardKind::eClipboard);
+            if (text.empty()) return;
+
+            auto data = Clipboard::PreparePaste(
+                StringView(text.data(), text.size()),
+                session->Console->GetBracketedPasteMode());
+            session->Pty.Write(StringView(data.data(), data.size()));
+        }
+
+        void OnMouseDown(MouseButton button, usize x, usize y,
+                         u32 clicks) override
+        {
+            auto session = Active();
+            if (!session) return;
+
+            if (button == MouseButton::eMiddle)
+                return OnPaste(ClipboardKind::ePrimary);
+            if (button != MouseButton::eLeft) return;
+
+            auto  console = session->Console;
+            auto  cell    = console->CellAt(x, y);
+            m_Selecting   = false;
+            if (clicks >= 3) console->SelectLine(cell.Y);
+            else if (clicks == 2) console->SelectWord(cell);
+            else
+            {
+                // A single click only drops the selection, dragging starts a
+                // new one
+                console->ClearSelection();
+                m_Selecting       = true;
+                m_SelectionAnchor = cell;
+                return;
+            }
+
+            CopyToPrimary(session);
+        }
+        void OnMouseMove(usize x, usize y) override
+        {
+            auto session = Active();
+            if (!session || !m_Selecting) return;
+
+            auto console = session->Console;
+            auto cell    = console->CellAt(x, y);
+            if (cell == m_SelectionAnchor && !console->HasSelection()) return;
+
+            console->SetSelection(m_SelectionAnchor, cell);
+        }
+        void OnMouseUp(MouseButton button, usize x, usize y) override
+        {
+            if (button != MouseButton::eLeft || !m_Selecting) return;
+
+            OnMouseMove(x, y);
+            m_Selecting = false;
+            if (auto session = Active()) CopyToPrimary(session);
+        }
+
       private:
         Framebuffer&      m_Framebuffer;
         const Arguments&  m_Arguments;
@@ -312,6 +394,18 @@ namespace
         Vector<Session*>  m_Sessions;
         usize             m_ActiveIndex = 0;
         bool              m_Running     = true;
+
+        bool                     m_Selecting       = false;
+        FramebufferConsole::Cell m_SelectionAnchor = {};
+
+        void                     CopyToPrimary(Session* session)
+        {
+            if (!session->Console->HasSelection()) return;
+
+            auto text = session->Console->GetSelectedText();
+            m_Framebuffer.SetClipboard(ClipboardKind::ePrimary,
+                                       StringView(text.data(), text.size()));
+        }
 
         Session*          Active()
         {
@@ -325,7 +419,7 @@ namespace
             options.Background = Span<u8>(m_Background.Raw(), m_Background.Size());
             options.FontScale  = m_Arguments.FontScale;
 
-            auto session       = new Session;
+            auto session       = new Session(m_Framebuffer);
             session->Console   = FramebufferConsole::Create(m_Framebuffer, options);
             if (!session->Console)
             {
@@ -374,6 +468,7 @@ namespace
                 previous->Console->SetActive(false);
 
             m_ActiveIndex = index;
+            m_Selecting   = false;
             session->Console->SetActive(true);
             return true;
         }
